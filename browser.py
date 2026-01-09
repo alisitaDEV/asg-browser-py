@@ -1,8 +1,9 @@
 import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('WebKit2', '4.1')
-from gi.repository import Gtk, WebKit2, Gio, Gdk
+from gi.repository import Gtk, WebKit2, Gio, Gdk, Soup
 from gi.repository import Pango
+from gi.repository import GLib
 import json
 import os
 
@@ -12,9 +13,16 @@ class ASGBrowser(Gtk.Window):
         self.set_default_size(1100, 650)
         self.set_title("ASG Browser")
 
+        # Setup WebsiteDataManager (untuk localStorage, IndexedDB, cache, dll)
+        self.data_manager = self.get_data_manager()
+
+        # >>> AKTIFKAN PENYIMPANAN COOKIE PERMANEN <<<
+        self.setup_persistent_cookies()
+
         # Daftar bookmark (disimpan di memori)
-        self.bookmarks = []  
-        # Homepage default (bisa diubah di pengaturan)
+        self.bookmarks = []
+
+        # Homepage default
         self.homepage_html = self.get_default_homepage()
 
         # ================= HEADER BAR =================
@@ -26,9 +34,7 @@ class ASGBrowser(Gtk.Window):
         self.stack_switcher.set_hexpand(True)
         header.set_custom_title(self.stack_switcher)
 
-        self.btn_new_tab = Gtk.Button.new_from_icon_name(
-            "list-add-symbolic", Gtk.IconSize.BUTTON
-        )
+        self.btn_new_tab = Gtk.Button.new_from_icon_name("list-add-symbolic", Gtk.IconSize.BUTTON)
         self.btn_new_tab.set_relief(Gtk.ReliefStyle.NONE)
         self.btn_new_tab.set_tooltip_text("Tab baru")
         self.btn_new_tab.connect("clicked", self.new_tab)
@@ -76,7 +82,6 @@ class ASGBrowser(Gtk.Window):
         menu_btn.set_image(Gtk.Image.new_from_icon_name("view-more-symbolic", Gtk.IconSize.BUTTON))
         menu_btn.set_relief(Gtk.ReliefStyle.NONE)
         menu_btn.set_tooltip_text("Menu")
-
         menu = Gio.Menu()
         menu.append("Add To Bookmark", "app.add_bookmark")
         menu.append("Bookmark List", "app.bookmark_list")
@@ -85,9 +90,8 @@ class ASGBrowser(Gtk.Window):
         menu_btn.set_menu_model(menu)
         toolbar.pack_start(menu_btn, False, False, 0)
 
-                # Action group
+        # Action group
         actions = Gio.SimpleActionGroup()
-
         add_bookmark_action = Gio.SimpleAction.new("add_bookmark", None)
         add_bookmark_action.connect("activate", self.on_add_bookmark)
         actions.add_action(add_bookmark_action)
@@ -123,16 +127,48 @@ class ASGBrowser(Gtk.Window):
         self.connect("destroy", Gtk.main_quit)
         self.show_all()
 
+    def get_data_manager(self):
+        base_dir = os.path.join(GLib.get_user_data_dir(), "asg-browser")
+        os.makedirs(base_dir, exist_ok=True)
+        return WebKit2.WebsiteDataManager(
+            base_data_directory=base_dir,
+            base_cache_directory=os.path.join(base_dir, "cache")
+        )
+
+    def setup_persistent_cookies(self):
+        """Aktifkan penyimpanan cookie permanen agar login tetap bertahan"""
+        cookie_manager = self.data_manager.get_cookie_manager()
+
+        # Pilih salah satu format penyimpanan:
+        # 1. TEXT (mudah dibaca, cocok untuk debug)
+        # 2. SQLITE (lebih efisien untuk jumlah cookie banyak)
+
+        cookie_file = os.path.join(
+            self.data_manager.get_base_data_directory(),
+            "cookies.txt"   # atau "cookies.sqlite" jika pakai SQLITE
+        )
+
+        cookie_manager.set_persistent_storage(
+            cookie_file,
+            WebKit2.CookiePersistentStorage.TEXT   # ganti ke .SQLITE jika ingin
+        )
+
+        # Izinkan semua cookie (termasuk third-party jika situs butuh)
+        # Alternatif: Soup.CookieJarAcceptPolicy.NO_THIRD_PARTY untuk lebih aman
+        cookie_manager.set_accept_policy(Soup.CookieJarAcceptPolicy.ALWAYS)
+
+        print(f"Cookie disimpan permanen di: {cookie_file}")
+
     def get_default_homepage(self):
         return """
         <html>
         <head>
             <meta charset="utf-8">
             <style>
-                body { 
-                    font-family: sans-serif; 
-                    text-align: center; 
-                    margin: 0; 
+                body {
+                    font-family: sans-serif;
+                    text-align: center;
+                    margin: 0;
                     padding: 0;
                     height: 100vh;
                     display: flex;
@@ -157,16 +193,14 @@ class ASGBrowser(Gtk.Window):
     def new_tab(self, *_):
         webview = self.create_webview()
 
-        # Box untuk tab: label + tombol close
         tab_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         tab_box.set_margin_start(4)
         tab_box.set_margin_end(4)
 
         label = Gtk.Label(label="New Tab")
-        label.set_ellipsize(Pango.EllipsizeMode.END)  # potong judul panjang
+        label.set_ellipsize(Pango.EllipsizeMode.END)
         tab_box.pack_start(label, True, True, 0)
 
-        # Tombol close (×)
         close_btn = Gtk.Button()
         close_btn.set_relief(Gtk.ReliefStyle.NONE)
         close_btn.add(Gtk.Image.new_from_icon_name("window-close-symbolic", Gtk.IconSize.SMALL_TOOLBAR))
@@ -176,23 +210,16 @@ class ASGBrowser(Gtk.Window):
 
         tab_box.show_all()
 
-        # Tambahkan ke stack dengan custom tab widget
         self.stack.add_titled(webview, str(id(webview)), "New Tab")
-        self.stack.child_set_property(webview, "title", "New Tab")  # untuk stack switcher
-        self.stack.child_set_property(webview, "tab", tab_box)     # ini yang penting!
+        self.stack.child_set_property(webview, "title", "New Tab")
+        self.stack.child_set_property(webview, "tab", tab_box)
 
-        # Update judul saat berubah
         webview.connect("notify::title", self.on_title_changed, label)
-
-        # Pindah ke tab baru
         self.stack.set_visible_child(webview)
         self.load_start_page(webview)
 
     def close_tab(self, button, webview):
-        # Hapus page dari stack
         self.stack.remove(webview)
-        
-        # Jika tidak ada tab lagi, buat tab baru kosong
         if self.stack.get_visible_child() is None:
             self.new_tab()
 
@@ -202,45 +229,31 @@ class ASGBrowser(Gtk.Window):
     def on_title_changed(self, webview, param, label_widget):
         title = webview.get_title() or "New Tab"
         label_widget.set_text(title)
-        
-        # Update juga title di stack (untuk accessibility & sorting jika ada)
         self.stack.child_set_property(webview, "title", title)
 
     # ================= WEBVIEW =================
     def create_webview(self):
-        webview = WebKit2.WebView()
+        context = WebKit2.WebContext.new_with_website_data_manager(self.data_manager)
+        webview = WebKit2.WebView.new_with_context(context)
+
         webview.connect("load-changed", self.on_load_changed)
         webview.connect("notify::estimated-load-progress", self.on_progress_changed)
-        #webview.connect("create", self.on_create_webview)
         webview.connect("context-menu", self.on_context_menu)
         webview.show()
         return webview
 
-    # def on_create_webview(self, webview, navigation):
-    #     self.new_tab()
-    #     return self.get_current_webview()
-
     def on_context_menu(self, webview, context_menu, event, hit_test_result):
-        # Cek apakah klik kanan di atas link
         if hit_test_result.context_is_link():
             link_uri = hit_test_result.get_link_uri()
-
-            # Buat action custom unik (agar tidak bentrok)
             action_name = f"open-link-new-tab-{id(webview)}"
             action = Gio.SimpleAction.new(action_name, None)
             action.connect("activate", lambda a, p, url=link_uri: self.open_link_in_new_tab(url))
-
-            # Buat menu item dari action
             new_tab_item = WebKit2.ContextMenuItem.new_from_gaction(
                 action, "Buka Link di Tab Baru", None
             )
-
-            # Tambahkan separator dan item di atas (prepend agar muncul paling atas)
             separator = WebKit2.ContextMenuItem.new_separator()
             context_menu.prepend(separator)
             context_menu.prepend(new_tab_item)
-
-        # Return False agar menu default WebKit tetap muncul (beserta tambahan kita)
         return False
 
     def open_link_in_new_tab(self, url):
@@ -260,7 +273,7 @@ class ASGBrowser(Gtk.Window):
         if not url:
             return
         if not url.startswith(("http://", "https://", "file://")):
-            if " " in url:  # jika ada spasi, anggap sebagai query pencarian
+            if " " in url:
                 url = "https://www.google.com/search?q=" + url.replace(" ", "+")
             else:
                 url = "https://" + url
@@ -311,14 +324,12 @@ class ASGBrowser(Gtk.Window):
             title = webview.get_title() or "Tanpa Judul"
             uri = webview.get_uri() or ""
             if uri.startswith("file://"):
-                uri = ""  # jangan bookmark halaman lokal
-            if uri:
-                # Cek duplikat
-                if not any(b['url'] == uri for b in self.bookmarks):
-                    self.bookmarks.append({"title": title, "url": uri})
-                    self.show_info_dialog("Bookmark ditambahkan!", f"{title}\n{uri}")
-                else:
-                    self.show_info_dialog("Informasi", "Halaman ini sudah ada di bookmark.")
+                uri = ""
+            if uri and not any(b['url'] == uri for b in self.bookmarks):
+                self.bookmarks.append({"title": title, "url": uri})
+                self.show_info_dialog("Bookmark ditambahkan!", f"{title}\n{uri}")
+            elif uri:
+                self.show_info_dialog("Informasi", "Halaman ini sudah ada di bookmark.")
 
     def on_bookmark_list(self, action, param):
         dialog = Gtk.Dialog(title="Daftar Bookmark", transient_for=self, flags=0)
@@ -327,7 +338,6 @@ class ASGBrowser(Gtk.Window):
 
         scrolled = Gtk.ScrolledWindow()
         dialog.get_content_area().add(scrolled)
-
         listbox = Gtk.ListBox()
         scrolled.add(listbox)
 
@@ -337,32 +347,34 @@ class ASGBrowser(Gtk.Window):
             listbox.add(label)
         else:
             for bm in self.bookmarks:
-                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-                row.set_margin_start(10)
-                row.set_margin_end(10)
-                row.set_margin_top(5)
-                row.set_margin_bottom(5)
-
-                label = Gtk.Label(label=f"<b>{bm['title']}</b>\n<small>{bm['url']}</small>")
-                label.set_use_markup(True)
-                label.set_halign(Gtk.Align.START)
-                row.pack_start(label, True, True, 0)
-
-                # Tombol buka di tab baru
-                btn_open = Gtk.Button.new_with_label("Buka")
-                btn_open.connect("clicked", lambda w, url=bm['url']: self.open_bookmark(url))
-                row.pack_end(btn_open, False, False, 0)
-
-                # Tombol hapus
-                btn_del = Gtk.Button.new_from_icon_name("edit-delete-symbolic", Gtk.IconSize.BUTTON)
-                btn_del.connect("clicked", lambda w, item=bm: self.delete_bookmark(item, listbox))
-                row.pack_end(btn_del, False, False, 0)
-
+                row = self._create_bookmark_row(bm, listbox)
                 listbox.add(row)
 
         dialog.show_all()
         dialog.run()
         dialog.destroy()
+
+    def _create_bookmark_row(self, bm, listbox):
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        row.set_margin_start(10)
+        row.set_margin_end(10)
+        row.set_margin_top(5)
+        row.set_margin_bottom(5)
+
+        label = Gtk.Label(label=f"<b>{bm['title']}</b>\n<small>{bm['url']}</small>")
+        label.set_use_markup(True)
+        label.set_halign(Gtk.Align.START)
+        row.pack_start(label, True, True, 0)
+
+        btn_open = Gtk.Button.new_with_label("Buka")
+        btn_open.connect("clicked", lambda w, url=bm['url']: self.open_bookmark(url))
+        row.pack_end(btn_open, False, False, 0)
+
+        btn_del = Gtk.Button.new_from_icon_name("edit-delete-symbolic", Gtk.IconSize.BUTTON)
+        btn_del.connect("clicked", lambda w, item=bm: self.delete_bookmark(item, listbox))
+        row.pack_end(btn_del, False, False, 0)
+
+        return row
 
     def open_bookmark(self, url):
         self.new_tab()
@@ -372,31 +384,10 @@ class ASGBrowser(Gtk.Window):
 
     def delete_bookmark(self, bookmark_item, listbox):
         self.bookmarks.remove(bookmark_item)
-        # Refresh listbox
         for child in listbox.get_children():
             listbox.remove(child)
-        # Re-add semua
         for bm in self.bookmarks:
-            # (kode row sama seperti di atas, bisa difaktorkan nanti)
-            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-            row.set_margin_start(10)
-            row.set_margin_end(10)
-            row.set_margin_top(5)
-            row.set_margin_bottom(5)
-
-            label = Gtk.Label(label=f"<b>{bm['title']}</b>\n<small>{bm['url']}</small>")
-            label.set_use_markup(True)
-            label.set_halign(Gtk.Align.START)
-            row.pack_start(label, True, True, 0)
-
-            btn_open = Gtk.Button.new_with_label("Buka")
-            btn_open.connect("clicked", lambda w, url=bm['url']: self.open_bookmark(url))
-            row.pack_end(btn_open, False, False, 0)
-
-            btn_del = Gtk.Button.new_from_icon_name("edit-delete-symbolic", Gtk.IconSize.BUTTON)
-            btn_del.connect("clicked", lambda w, item=bm: self.delete_bookmark(item, listbox))
-            row.pack_end(btn_del, False, False, 0)
-
+            row = self._create_bookmark_row(bm, listbox)
             listbox.add(row)
         listbox.show_all()
 
@@ -420,17 +411,13 @@ class ASGBrowser(Gtk.Window):
         grid.attach(label, 0, 0, 2, 1)
 
         entry = Gtk.Entry()
-        # Jika ingin simpan permanen, load dari file di sini
         grid.attach(entry, 0, 1, 2, 1)
 
         dialog.show_all()
         response = dialog.run()
         if response == Gtk.ResponseType.OK:
             custom_html = entry.get_text().strip()
-            if custom_html:
-                self.homepage_html = custom_html
-            else:
-                self.homepage_html = self.get_default_homepage()
+            self.homepage_html = custom_html if custom_html else self.get_default_homepage()
             self.show_info_dialog("Pengaturan disimpan", "Homepage telah diperbarui.")
         dialog.destroy()
 
@@ -459,6 +446,7 @@ class ASGBrowser(Gtk.Window):
         dlg.format_secondary_text(message)
         dlg.run()
         dlg.destroy()
+
 
 if __name__ == "__main__":
     ASGBrowser()
